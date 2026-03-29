@@ -293,9 +293,28 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the detailed memory bridge design.
 
 ## Status
 
-🟡 **Pre-alpha / Research** — Architecture defined, feasibility validated, no code yet.
+🟢 **Phase 1: Implementation started** — Engine built and benchmarked.
 
-Phase 1A (NPU proof of life) is the immediate next step. Contributions, discussion, and collaboration welcome — especially from anyone running Ryzen AI 300 on Linux.
+### What's running now
+
+| Component | Status | Benchmark |
+|-----------|--------|-----------|
+| Pulsed inference engine | ✅ Working | 7 modules, CLI interface |
+| Vulkan GPU compute (Kompute) | ✅ Working | 512x512 matmul: 0.82ms (14.6x vs CPU) |
+| CPU belt (ThreadPoolExecutor) | ✅ Working | 512x512 matmul: 12.02ms |
+| Hardware monitor | ✅ Working | GPU/CPU/NPU metrics via amdgpu_top + sysfs |
+| Personality (SQLite learning) | ✅ Working | Records per-run metrics, builds routing rules |
+| Thermal pulse controller | ✅ Working | Adaptive burst/cooldown based on GPU temp |
+| NPU detection | ✅ Detected | amdxdna driver loaded, /dev/accel/accel0 |
+| NPU execution belt | 🔜 Next | IREE runtime installed, integration pending |
+
+```
+python -m engine --benchmark     # Run diagnostic benchmark
+python -m engine --status        # Show hardware + engine status
+python -m engine --personality show  # View learned routing rules
+```
+
+Contributions, discussion, and collaboration welcome — especially from anyone running Ryzen AI 300 on Linux.
 
 ---
 
