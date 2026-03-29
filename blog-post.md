@@ -70,7 +70,7 @@ CPU+GPU co-execution is well-studied (CoDL, SparOA). NPU+GPU scheduling exists i
 
 To be clear: I've architected this and validated feasibility, not shipped a running system. But the architecture itself, the feasibility study, and the research synthesis represent the first open-source attempt at this category of runtime.
 
-## Five novel contributions
+## Six novel contributions
 
 From the full literature review, these have no existing implementation:
 
@@ -79,14 +79,15 @@ From the full literature review, these have no existing implementation:
 3. **Three-processor dynamic operator placement** on a single SoC (CPU+GPU is studied; all three is not)
 4. **Cross-model transfer learning** for on-device scheduling (learning from Model A improves scheduling of Model B)
 5. **Vulkan+XRT memory bridge** — combining Vulkan's superior unified memory access with XRT buffer objects via CPU-mediated sharing
+6. **NPU-bookended assembly line** — NPU dispatches at the start, assembles at the end; CPU and GPU are decoupled async producers. 1000:1 speed ratio makes scheduling overhead effectively zero
 
 ## What's next
 
-I'm calling the project **Route Rag Racer** [Adaptive Tri-Processor Inference Runtime] — because that's what it does: routes workloads, learns from runtime data (RAG-style adaptive feedback), and races for optimal performance across all three processors.
+I'm calling the project **R.A.G-Race-Router** [Adaptive Tri-Processor Inference Runtime]. The runtime treats the three processors as an assembly line: CPU and GPU are asynchronous production belts, and the NPU bookends the pipeline — dispatching work at the start, assembling output at the end. At 50 TOPS, the NPU evaluates scheduling decisions in microseconds while CPU/GPU compute takes milliseconds. It appears to be in two places at once. After a few runs, it encodes the dispatch pattern as lightweight rules that auto-execute with near-zero overhead, only re-engaging when something changes.
 
 The full feasibility study, architecture, literature review, and Phase 1 build instructions are here:
 
-**→ [github.com/Peterc3-dev/route-rag-racer](https://github.com/Peterc3-dev/route-rag-racer)**
+**→ [github.com/Peterc3-dev/rag-race-router](https://github.com/Peterc3-dev/rag-race-router)**
 
 Phase 1 is proving three-processor data flow on a Ryzen AI 300 under CachyOS. The immediate step is getting FastFlowLM running on the NPU and benchmarking the three-way pipeline.
 

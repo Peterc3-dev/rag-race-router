@@ -1,10 +1,10 @@
-# CLAUDE.md — Route Rag Racer [Adaptive Tri-Processor Inference Runtime]
+# CLAUDE.md — R.A.G-Race-Router [Adaptive Tri-Processor Inference Runtime]
 
 ## Project identity
 
-**Route Rag Racer** [Adaptive Tri-Processor Inference Runtime] is the first open-source architecture for self-optimizing tri-processor inference on AMD Ryzen AI 300 series APUs. It dynamically routes ML workloads across CPU (Zen 5), iGPU (RDNA 3.5 / Radeon 890M), and NPU (XDNA 2) on a single SoC with shared memory — learning the optimal split for each specific chip over time.
+**R.A.G-Race-Router** [Adaptive Tri-Processor Inference Runtime] is the first open-source architecture for self-optimizing tri-processor inference on AMD Ryzen AI 300 series APUs. It dynamically routes ML workloads across CPU (Zen 5), iGPU (RDNA 3.5 / Radeon 890M), and NPU (XDNA 2) on a single SoC with shared memory — learning the optimal split for each specific chip over time.
 
-- **Repo:** `Peterc3-dev/route-rag-racer`
+- **Repo:** `Peterc3-dev/rag-race-router`
 - **Author:** Peter Clemente (@Peterc3-dev)
 - **Status:** Pre-alpha / architecture + feasibility study. No runtime code yet.
 - **License:** MIT
@@ -12,7 +12,7 @@
 ## What's in the repo
 
 ```
-route-rag-racer/
+rag-race-router/
 ├── CLAUDE.md             ← You are here
 ├── CLAUDE_CODE_TASK.md   ← One-time publish task (proofread + push to GitHub)
 ├── README.md             ← Full project README (architecture, research, build plan)
@@ -25,9 +25,9 @@ route-rag-racer/
 Read `CLAUDE_CODE_TASK.md` for the immediate task. Summary:
 
 1. **Proofread** README.md and blog-post.md — fix typos, verify URLs, check technical consistency, flag any overclaiming
-2. **Rename the project** from "tri-processor-inference" to "Route Rag Racer" across all files:
-   - Repo description and README title/header should reference "Route Rag Racer"
-   - Keep the repo slug as `route-rag-racer` (not `tri-processor-inference`)
+2. **Rename the project** from "tri-processor-inference" to "R.A.G-Race-Router" across all files:
+   - Repo description and README title/header should reference "R.A.G-Race-Router"
+   - Keep the repo slug as `rag-race-router` (not `tri-processor-inference`)
    - Blog post title can stay as-is (it's a hook, not a brand announcement) but mention the project name somewhere natural
 3. **Create the repo** on GitHub under Peterc3-dev and push
 4. **Do NOT** publish the blog post to dev.to — just confirm it's ready
@@ -36,7 +36,7 @@ Read `CLAUDE_CODE_TASK.md` for the immediate task. Summary:
 
 ### The architecture in one paragraph
 
-Route Rag Racer coordinates all three processors on an AMD Ryzen AI 300 APU for ML inference. The NPU handles efficient inference (50 TOPS at 2W) and runs a tiny scheduling neural network as a persistent background agent. The iGPU handles parallel compute via Vulkan (not ROCm — Vulkan is 60% faster on the 890M due to unified memory access). The CPU orchestrates, preprocesses, and fills gaps. A feedback loop collects runtime metrics (latency, power, thermal, memory pressure) and continuously refines the scheduling policy. Over time, each machine develops a unique "hardware personality" — an evolving model of that specific chip's behavior.
+R.A.G-Race-Router coordinates all three processors on an AMD Ryzen AI 300 APU for ML inference. The NPU handles efficient inference (50 TOPS at 2W) and runs a tiny scheduling neural network as a persistent background agent. The iGPU handles parallel compute via Vulkan (not ROCm — Vulkan is 60% faster on the 890M due to unified memory access). The CPU orchestrates, preprocesses, and fills gaps. A feedback loop collects runtime metrics (latency, power, thermal, memory pressure) and continuously refines the scheduling policy. Over time, each machine develops a unique "hardware personality" — an evolving model of that specific chip's behavior.
 
 ### Key technical facts (do not contradict these)
 
@@ -46,7 +46,7 @@ Route Rag Racer coordinates all three processors on an AMD Ryzen AI 300 APU for 
 - **FastFlowLM v0.9.35+** (via Lemonade 10.0) is the working NPU inference path on Linux. Llama 3.2 1B at ~60 tok/s, <2W.
 - **XDNA kernel driver mainlined in Linux 6.14.** XRT userspace must be built from source on Arch/CachyOS.
 - **The "first of its kind" claim is scoped precisely:** first open-source *architecture* for self-optimizing tri-processor inference on a consumer APU. Not "first runtime" — there is no runtime code yet. This distinction is load-bearing for credibility.
-- **Five confirmed novel contributions** (no prior art found in 25+ paper review): NPU-as-scheduling-agent, persistent hardware personality, three-processor dynamic operator placement, cross-model transfer learning for on-device scheduling, Vulkan+XRT memory bridge.
+- **Six confirmed novel contributions** (no prior art found in 25+ paper review): NPU-as-scheduling-agent, persistent hardware personality, three-processor dynamic operator placement, cross-model transfer learning for on-device scheduling, Vulkan+XRT memory bridge, NPU-bookended assembly line.
 - **AMD's own research (Karami et al., 2025)** characterizes the scheduling problem (O(2^125) search space) but does not build a runtime.
 
 ### Hardware target

@@ -1,4 +1,4 @@
-# Route Rag Racer [Adaptive Tri-Processor Inference Runtime]
+# R.A.G-Race-Router [Adaptive Tri-Processor Inference Runtime]
 
 **A self-optimizing inference runtime that coordinates CPU, iGPU, and NPU on AMD Ryzen AI 300 series APUs.**
 
@@ -96,6 +96,60 @@ Data flow (current feasible path):
 
 The GPU↔NPU bridge requires CPU-mediated host buffers today. A DMA-BUF PRIME implementation in the amdxdna driver would enable direct transfer — architecturally straightforward but not yet done.
 
+### The assembly line model
+
+The core runtime architecture treats the three processors as an assembly line with the NPU bookending the pipeline:
+
+```
+                         NPU
+                    ┌────────────┐
+                    │  CONTROL   │    Dispatches work to CPU & GPU belts.
+                    │  PANEL     │    Learned rules, interrupt-driven.
+                    │            │    Only intervenes when pattern breaks.
+                    └──────┬─────┘
+                      ┌────┴────┐
+                      ▼         ▼
+               CPU BELT       GPU BELT
+               ════════       ════════
+              │ task A │     │ task X │    Asynchronous, decoupled.
+              │ task B │     │ task Y │    No coordination between
+              │ task C │     │ task Z │    CPU and GPU needed.
+              └───┬────┘     └────┬───┘
+                  └───────┬───────┘
+                          ▼
+                    ┌────────────┐
+                    │  ASSEMBLY  │    Collects fragments from both belts.
+                    │  STATION   │    Combines with NPU's own tools
+                    │  + TOOLS   │    (INT8 compute, normalization).
+                    └──────┬─────┘
+                           ▼
+                       OUTPUT
+```
+
+**The NPU has two roles at two positions — but it's one processor.** At 50 TOPS, the NPU evaluates a scheduling decision in microseconds while CPU/GPU compute takes milliseconds. The ratio is 1000:1. It dispatches, zips to assembly, assembles, zips back — the belts haven't moved. One worker appearing as two.
+
+**Why this works:**
+
+1. **CPU and GPU are asynchronous producers.** They push fragments onto their belts independently. No synchronization between them. No fences. No waiting on each other.
+
+2. **The NPU sets the pace.** It pulls from whichever belt has ready fragments. GPU stalls from thermal throttle → NPU keeps assembling from CPU fragments. Natural backpressure, no explicit scheduling logic needed.
+
+3. **Interrupt-driven, not polling.** After the first ~10 runs, the NPU encodes the dispatch pattern as lightweight rules. These auto-execute with near-zero overhead. The NPU only recomputes the full scheduling policy when something changes — a thermal spike, a driver update, a new model shape.
+
+4. **Closed feedback loop.** The same brain that dispatched the work inspects the results. If GPU fragments arrive late → control panel adjusts next dispatch. If a pattern shifts → NPU re-evaluates and encodes new rules. Dispatcher and quality inspector are the same entity with perfect memory.
+
+5. **Scheduling overhead is effectively zero.** The NPU's scheduling cost (microseconds) is negligible relative to the work being scheduled (milliseconds). It does scheduling as a side effect of existing.
+
+**Why no existing runtime works this way:**
+
+| Traditional scheduler | R.A.G-Race-Router assembly line |
+|---|---|
+| Static dispatcher assigns devices | NPU dispatches AND assembles |
+| CPU/GPU must synchronize | CPU/GPU are fully decoupled |
+| Scheduler is overhead | Scheduler is also compute (assembly) |
+| Fails if scheduler is wrong | Degrades gracefully (fewer fragments, slower, never crashes) |
+| No learning | Learns → encodes rules → goes idle → intervenes on exception |
+
 ### The three-phase build plan
 
 **Phase 1 (weeks): Prove three-processor inference**
@@ -120,7 +174,7 @@ The GPU↔NPU bridge requires CPU-mediated host buffers today. A DMA-BUF PRIME i
 
 ## Novel contributions
 
-Based on a full literature review, five aspects of this project have no prior art:
+Based on a full literature review, six aspects of this project have no prior art:
 
 1. **NPU-as-scheduling-agent** — Running a placement policy neural network on dedicated NPU columns to orchestrate CPU+GPU workloads. The SmartNIC-as-orchestrator pattern (Wave, Conspirator, RingLeader) validates the concept; no one has applied it to NPUs.
 
@@ -131,6 +185,8 @@ Based on a full literature review, five aspects of this project have no prior ar
 4. **Cross-model transfer learning for on-device scheduling** — Learning from scheduling Model A to improve scheduling of Model B on the same hardware. Placeto and REGAL demonstrate transfer in cloud settings; on-device heterogeneous transfer is unexplored.
 
 5. **Vulkan+XRT memory bridge** — Exploiting Vulkan's superior unified memory access on gfx1150 as the GPU-side API with CPU-mediated sharing to XRT for NPU access. No existing project combines these two stacks.
+
+6. **NPU-bookended assembly line** — The NPU dispatches work at the pipeline start AND assembles output at the end, with CPU and GPU as asynchronous decoupled producers. The 1000:1 speed ratio (NPU microseconds vs CPU/GPU milliseconds) makes the NPU appear to occupy both positions simultaneously. After initial learning, dispatch rules are encoded as lightweight interrupt-driven policies with near-zero steady-state overhead. No existing runtime uses a single processor for both dispatch and assembly in a closed feedback loop.
 
 ---
 
