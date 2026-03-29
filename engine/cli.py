@@ -51,6 +51,31 @@ def main():
         "--config", choices=["show", "default"],
         help="Show current config or print default config",
     )
+    parser.add_argument(
+        "--stress", action="store_true",
+        help="Run thermal stress test with adaptive rerouting",
+    )
+    parser.add_argument(
+        "--duration", type=int, default=60,
+        help="Stress test duration in seconds (default: 60)",
+    )
+    parser.add_argument(
+        "--gaming", action="store_true",
+        help="Run gaming frame pipeline simulation",
+    )
+    parser.add_argument(
+        "--frames", type=int, default=100,
+        help="Number of gaming frames to simulate (default: 100)",
+    )
+    parser.add_argument(
+        "--musicgen", action="store_true",
+        help="Generate music through the engine (compare vs standalone)",
+    )
+    parser.add_argument("-p", "--prompt", type=str, default="deep bass dark atmospheric",
+                        help="MusicGen prompt")
+    parser.add_argument("--preset", type=str, help="MusicGen preset (electronic, ambient, etc.)")
+    parser.add_argument("-d", type=float, default=10.0, help="MusicGen duration in seconds")
+    parser.add_argument("-o", "--output", type=str, help="Output file path")
     parser.add_argument("--config-file", type=str, help="Path to JSON config file")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--temp-ceiling", type=float, help="GPU temperature ceiling")
@@ -123,6 +148,74 @@ def main():
 
     if args.demo:
         _run_demo(engine, args.runs, args.verbose, args.json)
+        return
+
+    if args.stress:
+        from .stress_test import run_stress_test
+        results = run_stress_test(engine, duration_s=args.duration, verbose=args.verbose)
+        if args.json:
+            _output(results, True)
+        return
+
+    if args.gaming:
+        from .gaming_demo import run_gaming_benchmark
+        print(f"R.A.G-Race-Router -- Gaming Simulation ({args.frames} frames)")
+        print("-" * 55)
+        print()
+        results = run_gaming_benchmark(engine, n_frames=args.frames, verbose=args.verbose)
+
+        if args.json:
+            _output(results, True)
+        else:
+            e = results["engine"]
+            c = results["cpu_baseline"]
+            print(f"\nFrame pipeline: logic(CPU) -> geometry(GPU) -> shade(GPU) -> upscale(NPU) -> post(CPU)")
+            print()
+            print(f"CPU-only baseline:")
+            print(f"  Avg frame: {c['avg_ms']:.1f}ms ({c['avg_fps']:.0f} FPS)")
+            print(f"  1% low:    {c['p1_low_ms']:.1f}ms ({c['p1_low_fps']:.0f} FPS)")
+            print()
+            print(f"Engine (pulsed three-processor):")
+            print(f"  Avg frame: {e['avg_ms']:.1f}ms ({e['avg_fps']:.0f} FPS)")
+            print(f"  1% low:    {e['p1_low_ms']:.1f}ms ({e['p1_low_fps']:.0f} FPS)")
+            print(f"  Peak GPU:  {results['peak_gpu_temp']:.0f}C")
+            print(f"  Device map: {results['device_map']}")
+        return
+
+    if args.musicgen:
+        from .musicgen_router import generate_standalone, generate_engine_routed
+        print("R.A.G-Race-Router -- MusicGen Comparison")
+        print("-" * 45)
+        print()
+
+        prompt = args.prompt
+        duration = args.d
+        preset = args.preset
+        out_standalone = "/tmp/standalone.mp3"
+        out_engine = args.output or "/tmp/engine.mp3"
+
+        print(f"Prompt: {prompt}")
+        if preset:
+            print(f"Preset: {preset}")
+        print(f"Duration: {duration}s")
+        print()
+
+        print("Generating standalone (baseline)...")
+        standalone = generate_standalone(prompt, duration, preset, out_standalone)
+        print(f"  Done: {standalone.get('elapsed_s', '?')}s -> {out_standalone}")
+
+        print("Generating engine-routed...")
+        routed = generate_engine_routed(prompt, duration, preset, out_engine)
+        print(f"  Done: {routed.get('elapsed_s', '?')}s -> {out_engine}")
+
+        print()
+        print(f"{'Metric':<20} {'Standalone':<15} {'Engine':<15}")
+        print("-" * 50)
+        print(f"{'Time (s)':<20} {standalone.get('elapsed_s', 'N/A'):<15} {routed.get('elapsed_s', 'N/A'):<15}")
+        print(f"{'Temp delta':<20} {'N/A':<15} {routed.get('temp_delta', 'N/A'):<15}")
+
+        if args.json:
+            _output({"standalone": standalone, "engine": routed}, True)
         return
 
     # No command specified
