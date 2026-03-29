@@ -200,5 +200,61 @@ class Personality:
             ],
         }
 
+    def show_table(self) -> str:
+        """Return a formatted table of the personality profile."""
+        data = self.show()
+        total = data["total_runs"]
+        rules = data["routing_rules"]
+        by_device = data["by_device"]
+
+        if not rules and total == 0:
+            return f"Hardware Personality: No data yet. Run --demo to build profile."
+
+        lines = [f"Hardware Personality ({total} runs):"]
+
+        # Reroute counts from runs metadata
+        reroute_rows = self._conn.execute(
+            """SELECT operation, COUNT(*) as cnt
+               FROM runs WHERE metadata LIKE '%reroute%'
+               GROUP BY operation"""
+        ).fetchall()
+        reroutes = {r["operation"]: r["cnt"] for r in reroute_rows}
+
+        if rules:
+            # Header
+            lines.append(
+                f"{'Operation':<16} {'Best on':<8} {'Avg (ms)':<10} {'Samples':<9} {'Conf':<6} {'Reroutes'}"
+            )
+            lines.append("-" * 65)
+
+            for rule in rules:
+                op = rule["operation"]
+                dev = rule["preferred_device"]
+                conf = rule["confidence"]
+                samples = rule["samples"]
+
+                # Get avg_ms for best device
+                row = self._conn.execute(
+                    "SELECT AVG(duration_ms) as avg FROM runs WHERE operation=? AND device=? AND success=1",
+                    (op, dev),
+                ).fetchone()
+                avg = round(row["avg"], 2) if row and row["avg"] else 0.0
+
+                rr = reroutes.get(op, 0)
+                rr_str = f"{rr} (heat)" if rr > 0 else "0"
+                lines.append(
+                    f"{op:<16} {dev:<8} {avg:<10.2f} {samples:<9} {conf:<6.2f} {rr_str}"
+                )
+        else:
+            lines.append("  No routing rules yet — need more runs.")
+
+        if by_device:
+            lines.append("")
+            lines.append("By device:")
+            for dev, info in by_device.items():
+                lines.append(f"  {dev}: {info['count']} runs, avg {info['avg_ms']:.2f}ms")
+
+        return "\n".join(lines)
+
     def close(self):
         self._conn.close()

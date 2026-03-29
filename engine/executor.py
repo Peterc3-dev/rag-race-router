@@ -233,11 +233,11 @@ class NpuBelt:
                 future.set_result(fragment)
 
     def _check_flm(self) -> bool:
-        """Check if FLM server or binary is available."""
-        npu = self._monitor.snapshot.npu
-        if not npu.present or npu.status not in ("available", "driver_loaded"):
+        """Check if NPU is available (driver bound + flm binary exists)."""
+        # Direct check — don't rely on monitor which may not have polled yet
+        from pathlib import Path
+        if not Path("/dev/accel/accel0").exists():
             return False
-        # Check if flm binary exists
         import shutil
         return shutil.which("flm") is not None
 

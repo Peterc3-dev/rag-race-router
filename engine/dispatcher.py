@@ -54,7 +54,7 @@ class OpProfile:
 class Dispatcher:
     """Routes operations to the optimal device based on learned profiles."""
 
-    LEARNING_THRESHOLD = 10  # Runs before encoding rules
+    LEARNING_THRESHOLD = 5  # Runs before encoding rules
 
     def __init__(
         self,
@@ -71,6 +71,7 @@ class Dispatcher:
         self.npu_available = npu_available
         self._profiles: dict[tuple[str, str], OpProfile] = {}
         self._total_dispatches = 0
+        self._reroutes = 0
         self._rules_encoded = False
 
     def dispatch(self, operation: str, input_size: int = 0) -> DispatchDecision:
@@ -78,8 +79,10 @@ class Dispatcher:
         snap = self.monitor.snapshot
         self._total_dispatches += 1
 
-        # Phase 1: Use personality rules if available
-        if self._rules_encoded or self._total_dispatches > self.LEARNING_THRESHOLD:
+        # Phase 1: Use personality rules only after thorough learning
+        # Require rules_encoded AND enough dispatches (not OR) to avoid
+        # locking into single-device routing before trying alternatives
+        if self._rules_encoded and self._total_dispatches > self.LEARNING_THRESHOLD * 7:
             suggested = self.personality.suggest(
                 operation, temp=snap.gpu.temp_c, input_size=input_size
             )
@@ -87,12 +90,21 @@ class Dispatcher:
 
             # Validate: is the suggested device actually usable right now?
             if device == Device.GPU and not self._gpu_usable(snap):
+                self._reroutes += 1
+                device = Device.NPU if self.npu_available else Device.CPU
+                return DispatchDecision(
+                    device=device,
+                    reason=f"reroute: gpu thermal → {device.value}",
+                    confidence=0.7,
+                    fallback=Device.CPU,
+                )
+            if device == Device.NPU and not self.npu_available:
+                self._reroutes += 1
                 device = Device.CPU
                 return DispatchDecision(
                     device=device,
-                    reason=f"personality suggests gpu but thermal/availability override → cpu",
+                    reason=f"reroute: npu unavailable → cpu",
                     confidence=0.7,
-                    fallback=Device.CPU,
                 )
 
             return DispatchDecision(
@@ -109,34 +121,35 @@ class Dispatcher:
     ) -> DispatchDecision:
         """Simple heuristics before enough data for learned rules."""
 
-        # Large matrix ops → GPU if available and cool enough
-        if operation in ("matmul", "conv2d", "attention", "gemm"):
+        # Compute-heavy matrix ops → GPU if available and cool enough
+        if operation in ("matmul", "conv2d", "attention", "gemm", "project"):
             if self.gpu_available and self._gpu_usable(snap):
                 return DispatchDecision(
                     device=Device.GPU,
-                    reason=f"heuristic: {operation} is compute-heavy → gpu",
+                    reason=f"heuristic: {operation} → gpu (compute-heavy)",
                     confidence=0.5,
                     fallback=Device.CPU,
                 )
 
-        # Lightweight normalization → CPU (low overhead, not worth GPU dispatch)
-        if operation in ("layernorm", "rmsnorm", "softmax", "relu"):
-            return DispatchDecision(
-                device=Device.CPU,
-                reason=f"heuristic: {operation} is lightweight → cpu",
-                confidence=0.6,
-            )
-
-        # NPU for quantized inference and LLM token generation if available
+        # NPU-suitable ops: embeddings, normalization, quantized, LLM generation
         if self.npu_available and operation in (
+            "embed", "normalize", "layernorm", "rmsnorm",
             "quantized_matmul", "int8_gemm", "llm_generate",
             "npu_inference", "token_generation", "embedding",
         ):
             return DispatchDecision(
                 device=Device.NPU,
-                reason=f"heuristic: {operation} is NPU-optimized → npu",
-                confidence=0.6,
+                reason=f"heuristic: {operation} → npu (efficient)",
+                confidence=0.5,
                 fallback=Device.CPU,
+            )
+
+        # Lightweight ops → CPU
+        if operation in ("softmax", "relu", "tokenize", "decode"):
+            return DispatchDecision(
+                device=Device.CPU,
+                reason=f"heuristic: {operation} → cpu (lightweight)",
+                confidence=0.6,
             )
 
         # Default to CPU
@@ -198,6 +211,7 @@ class Dispatcher:
     def stats(self) -> dict:
         return {
             "total_dispatches": self._total_dispatches,
+            "reroutes": self._reroutes,
             "rules_encoded": self._rules_encoded,
             "profiles": {
                 f"{k[0]}/{k[1]}": {

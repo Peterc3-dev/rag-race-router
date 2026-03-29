@@ -27,7 +27,7 @@ class EngineConfig:
     monitor_interval_ms: int = 500
     cpu_workers: int = 4
     gpu_enabled: bool = True
-    npu_enabled: bool = False
+    npu_enabled: bool = True
     db_path: Optional[str] = None
 
     @classmethod

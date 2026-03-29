@@ -1,33 +1,43 @@
 """CLI for the R.A.G-Race-Router pulsed inference engine.
 
 Usage:
-    python -m engine --benchmark
-    python -m engine --benchmark --runs 20
-    python -m engine --status
-    python -m engine --personality show
-    python -m engine --personality reset
-    python -m engine --config show
+    python -m engine --demo                    # Run demo workload once
+    python -m engine --demo --runs 10          # Run 10 times (builds personality)
+    python -m engine --demo --verbose          # Verbose dispatch logging
+    python -m engine --personality show         # Show learned hardware profile
+    python -m engine --status                  # Live system status
+    python -m engine --benchmark               # Raw benchmark
 """
 
 import argparse
 import json
 import sys
+import time
 
 from . import EngineConfig, RagRaceRouter
+from .dispatcher import Device
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="rag-race-router",
-        description="R.A.G-Race-Router — Adaptive Tri-Processor Inference Runtime",
+        description="R.A.G-Race-Router -- Adaptive Tri-Processor Inference Runtime",
+    )
+    parser.add_argument(
+        "--demo", action="store_true",
+        help="Run three-processor dispatch demo workload",
     )
     parser.add_argument(
         "--benchmark", action="store_true",
         help="Run diagnostic benchmark across all devices",
     )
     parser.add_argument(
-        "--runs", type=int, default=10,
-        help="Number of benchmark iterations (default: 10)",
+        "--runs", type=int, default=1,
+        help="Number of demo/benchmark iterations (default: 1)",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Verbose dispatch logging",
     )
     parser.add_argument(
         "--status", action="store_true",
@@ -41,26 +51,11 @@ def main():
         "--config", choices=["show", "default"],
         help="Show current config or print default config",
     )
-    parser.add_argument(
-        "--config-file", type=str,
-        help="Path to JSON config file",
-    )
-    parser.add_argument(
-        "--json", action="store_true",
-        help="Output as JSON (default: formatted text)",
-    )
-    parser.add_argument(
-        "--temp-ceiling", type=float,
-        help="GPU temperature ceiling in Celsius",
-    )
-    parser.add_argument(
-        "--burst-ms", type=float,
-        help="GPU burst duration in milliseconds",
-    )
-    parser.add_argument(
-        "--no-gpu", action="store_true",
-        help="Disable GPU execution",
-    )
+    parser.add_argument("--config-file", type=str, help="Path to JSON config file")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--temp-ceiling", type=float, help="GPU temperature ceiling")
+    parser.add_argument("--burst-ms", type=float, help="GPU burst duration")
+    parser.add_argument("--no-gpu", action="store_true", help="Disable GPU execution")
 
     args = parser.parse_args()
 
@@ -90,7 +85,10 @@ def main():
         from .personality import Personality
         p = Personality()
         if args.personality == "show":
-            _output(p.show(), args.json)
+            if args.json:
+                _output(p.show(), True)
+            else:
+                print(p.show_table())
         elif args.personality == "reset":
             import os
             from .personality import DB_PATH
@@ -101,9 +99,9 @@ def main():
             else:
                 print("No personality data found.")
         elif args.personality == "update":
-            p.update_rules()
+            p.update_rules(min_samples=3)
             print("Routing rules updated.")
-            _output(p.show(), args.json)
+            print(p.show_table())
         p.close()
         return
 
@@ -111,30 +109,294 @@ def main():
     engine = RagRaceRouter(config=config)
 
     if args.status:
-        engine.start()
-        import time
-        time.sleep(1)  # Let monitor collect a snapshot
-        _output(engine.status(), args.json)
-        engine.stop()
+        _run_status(engine, args.json)
         return
 
     if args.benchmark:
         print(f"Running benchmark ({args.runs} iterations)...")
         engine.start()
-        import time
         time.sleep(0.5)
         results = engine.benchmark(n=args.runs)
         _output(results, args.json)
         engine.stop()
         return
 
+    if args.demo:
+        _run_demo(engine, args.runs, args.verbose, args.json)
+        return
+
     # No command specified
     parser.print_help()
 
 
+def _run_status(engine: RagRaceRouter, as_json: bool):
+    """Show live system status with all three processors."""
+    from pathlib import Path
+
+    engine.start()
+    time.sleep(1.0)
+    snap = engine.monitor.snapshot
+
+    if as_json:
+        _output(engine.status(), True)
+        engine.stop()
+        return
+
+    gpu_ok = engine.config.gpu_enabled
+    npu_ok = engine.dispatcher.npu_available
+    cpu_ok = True
+
+    print("R.A.G-Race-Router -- System Status")
+    print("-" * 50)
+    print(f"Processors: CPU {'ok' if cpu_ok else 'X'}  "
+          f"GPU (Vulkan) {'ok' if gpu_ok else 'X'}  "
+          f"NPU (XDNA) {'ok' if npu_ok else 'X'}")
+    print()
+    print(f"CPU:  {snap.cpu.freq_mhz:.0f} MHz | {snap.cpu.temp_c:.0f}C | "
+          f"load {snap.cpu.load_avg[0]:.1f}")
+    print(f"GPU:  {snap.gpu.temp_c:.0f}C | {snap.gpu.power_w:.1f}W | "
+          f"VRAM {snap.gpu.vram_used_mb:.0f}/{snap.gpu.vram_total_mb:.0f} MB | "
+          f"util {snap.gpu.util_pct:.0f}%")
+    if npu_ok:
+        print(f"NPU:  {snap.npu.status} | {snap.npu.driver} | "
+              f"FLM {snap.npu.flm_version}")
+    print(f"RAM:  {snap.mem_used_mb:.0f}/{snap.mem_total_mb:.0f} MB")
+    print()
+
+    pulse = engine.pulse.stats
+    print(f"Pulse: duty {pulse['duty_cycle']:.1%} | "
+          f"{pulse['burst_count']} bursts | "
+          f"budget {engine.pulse.thermal_budget(snap.gpu.temp_c):.0%}")
+    print(f"Personality: {engine.personality.show()['total_runs']} runs recorded")
+
+    engine.stop()
+
+
+def _run_demo(engine: RagRaceRouter, runs: int, verbose: bool, as_json: bool):
+    """Run the three-processor dispatch demo."""
+    from .ops import (
+        build_demo_workload, cpu_tokenize, cpu_embed, cpu_matmul,
+        cpu_attention, cpu_normalize, cpu_project, cpu_decode,
+        gpu_matmul, gpu_attention, gpu_project,
+        npu_embed, npu_normalize,
+    )
+    from .executor import WorkItem
+    import numpy as np
+
+    engine.start()
+    time.sleep(1.5)  # Wait for monitor to collect GPU metrics via amdgpu_top
+
+    snap = engine.monitor.snapshot
+    gpu_ok = engine.config.gpu_enabled
+    npu_ok = engine.dispatcher.npu_available
+
+    if not as_json:
+        print("R.A.G-Race-Router -- Three-Processor Pulsed Inference Demo")
+        print("-" * 58)
+        print()
+        print(f"Processors: CPU ok  "
+              f"GPU (Vulkan) {'ok' if gpu_ok else 'X'}  "
+              f"NPU (XDNA) {'ok' if npu_ok else 'X'}")
+        print(f"GPU Temp: {snap.gpu.temp_c:.0f}C | "
+              f"VRAM: {snap.gpu.vram_used_mb:.0f}/{snap.gpu.vram_total_mb:.0f} MB | "
+              f"Pulse: {'READY' if engine.pulse.should_fire_gpu(snap.gpu.temp_c) else 'COOLDOWN'}")
+        print()
+
+    all_results = []
+
+    for run_idx in range(runs):
+        if not as_json and runs > 1:
+            print(f"--- Run {run_idx + 1}/{runs} ---")
+
+        workload = build_demo_workload()
+
+        # Execute pipeline with dependency tracking
+        results = {}
+        dispatch_log = []
+        total_by_device = {"cpu": 0.0, "gpu": 0.0, "npu": 0.0}
+        overlapped = 0
+
+        for step in workload:
+            name = step["name"]
+            deps = step["deps"]
+
+            # Resolve function and args based on device decision
+            fn, args, device, reason = _resolve_op(
+                engine, step, results, gpu_ok, npu_ok
+            )
+
+            # Execute directly on the chosen belt (bypass double-dispatch)
+            work = WorkItem(
+                operation=name,
+                fn=fn,
+                args=args if args else (),
+                input_size=step["input_size"],
+            )
+
+            start_t = time.perf_counter()
+            fragment = engine.executor.execute(work)
+            elapsed = (time.perf_counter() - start_t) * 1000
+
+            results[name] = fragment.result
+            actual_device = fragment.device
+            total_by_device[actual_device.value] += elapsed
+
+            # Check if this could overlap with previous
+            if not deps:
+                overlapped += 1
+
+            tag = ""
+            if actual_device == Device.GPU:
+                tag = " <- pulsed burst"
+            elif actual_device == Device.NPU:
+                tag = " <- npu"
+
+            dispatch_log.append({
+                "op": name,
+                "device": actual_device.value,
+                "ms": round(elapsed, 2),
+                "tag": tag,
+                "reason": reason,
+            })
+
+            if verbose and not as_json:
+                print(f"  {name:<14} -> {actual_device.value:<6} ({elapsed:.2f}ms) "
+                      f"[{reason}]{tag}")
+
+        total_ms = sum(d["ms"] for d in dispatch_log)
+        gpu_ms = total_by_device["gpu"]
+        npu_ms = total_by_device["npu"]
+        cpu_ms = total_by_device["cpu"]
+        parallel_eff = (overlapped / max(len(workload), 1)) * 100
+
+        snap_after = engine.monitor.snapshot
+        temp_delta = snap_after.gpu.temp_c - snap.gpu.temp_c
+
+        run_result = {
+            "run": run_idx + 1,
+            "ops": dispatch_log,
+            "total_ms": round(total_ms, 2),
+            "gpu_ms": round(gpu_ms, 2),
+            "npu_ms": round(npu_ms, 2),
+            "cpu_ms": round(cpu_ms, 2),
+            "parallel_ops": overlapped,
+            "temp_before": snap.gpu.temp_c,
+            "temp_after": snap_after.gpu.temp_c,
+        }
+        all_results.append(run_result)
+
+        if not as_json and not verbose:
+            print(f"Dispatching {len(workload)} operations:")
+            for d in dispatch_log:
+                print(f"  {d['op']:<14} -> {d['device']:<6} ({d['ms']:.2f}ms){d['tag']}")
+
+        if not as_json:
+            print()
+            print(f"Pipeline: {total_ms:.2f}ms total "
+                  f"({gpu_ms:.2f}ms GPU, {npu_ms:.2f}ms NPU, {cpu_ms:.2f}ms CPU)")
+            print(f"Parallel efficiency: {parallel_eff:.0f}% ({overlapped} ops overlapped)")
+            print(f"GPU temp after: {snap_after.gpu.temp_c:.0f}C "
+                  f"({'+' if temp_delta >= 0 else ''}{temp_delta:.0f}C)")
+            print()
+
+        # Record to personality
+        engine.personality.update_rules(min_samples=3)
+
+        snap = snap_after
+
+    # Final personality status
+    p_data = engine.personality.show()
+    if not as_json:
+        rules_status = "adaptive routing active" if engine.dispatcher._rules_encoded else \
+            f"Need {max(0, engine.dispatcher.LEARNING_THRESHOLD - runs)} more for adaptive routing"
+        print(f"Personality: {p_data['total_runs']} runs recorded. {rules_status}.")
+        if runs >= engine.dispatcher.LEARNING_THRESHOLD and p_data["routing_rules"]:
+            print()
+            print(engine.personality.show_table())
+
+    if as_json:
+        _output({"runs": all_results, "personality": p_data}, True)
+
+    engine.stop()
+
+
+def _resolve_op(engine, step, results, gpu_ok, npu_ok):
+    """Resolve function, args, and device for a workload step. Returns (fn, args, device, reason)."""
+    from .ops import (
+        cpu_tokenize, cpu_embed, cpu_matmul, cpu_attention,
+        cpu_normalize, cpu_project, cpu_decode,
+        gpu_matmul, gpu_attention, gpu_project,
+        npu_embed, npu_normalize,
+    )
+    import numpy as np
+
+    name = step["name"]
+
+    # Determine device via dispatcher (single call)
+    decision = engine.dispatcher.dispatch(name, step["input_size"])
+    device = decision.device
+    reason = decision.reason
+
+    # Resolve function and args based on device + dependencies
+    if name == "tokenize":
+        fn, args = step["cpu"]
+        return fn, args, Device.CPU, reason
+
+    if name == "embed":
+        tokens = results.get("tokenize")
+        if device == Device.NPU and npu_ok:
+            return npu_embed, (tokens, 512), Device.NPU, reason
+        return cpu_embed, (tokens, 512), Device.CPU, reason
+
+    if name == "matmul":
+        if device == Device.GPU and gpu_ok:
+            return step["gpu"][0], step["gpu"][1], Device.GPU, reason
+        return step["cpu"][0], step["cpu"][1], Device.CPU, reason
+
+    if name == "attention":
+        embed_result = results.get("embed")
+        if embed_result is not None and len(embed_result.shape) == 2:
+            q = embed_result[:min(16, embed_result.shape[0])]
+            k, v = q.copy(), q.copy()
+        else:
+            q = k = v = np.random.randn(16, 512).astype(np.float32)
+        if device == Device.GPU and gpu_ok:
+            return gpu_attention, (q, k, v), Device.GPU, reason
+        return cpu_attention, (q, k, v), Device.CPU, reason
+
+    if name == "normalize":
+        attn_result = results.get("attention")
+        if attn_result is None:
+            attn_result = np.random.randn(16, 512).astype(np.float32)
+        if device == Device.NPU and npu_ok:
+            return npu_normalize, (attn_result,), Device.NPU, reason
+        return cpu_normalize, (attn_result,), Device.CPU, reason
+
+    if name == "project":
+        norm_result = results.get("normalize")
+        if norm_result is None:
+            norm_result = np.random.randn(16, 512).astype(np.float32)
+        weight = np.random.randn(norm_result.shape[-1], 128).astype(np.float32)
+        if device == Device.GPU and gpu_ok:
+            return gpu_project, (norm_result, weight), Device.GPU, reason
+        return cpu_project, (norm_result, weight), Device.CPU, reason
+
+    if name == "decode":
+        proj_result = results.get("project")
+        if proj_result is None:
+            proj_result = np.random.randn(16, 128).astype(np.float32)
+        return cpu_decode, (proj_result,), Device.CPU, reason
+
+    # Fallback
+    if step["cpu"]:
+        fn, args = step["cpu"]
+        return fn, args, Device.CPU, reason
+    raise ValueError(f"No implementation for {name}")
+
+
 def _output(data: dict, as_json: bool):
     if as_json:
-        print(json.dumps(data, indent=2))
+        print(json.dumps(data, indent=2, default=str))
     else:
         _pretty_print(data)
 

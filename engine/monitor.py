@@ -150,20 +150,38 @@ class HardwareMonitor:
                     dev = devices
                 else:
                     dev = data
-                # Temperature
+                # Temperature — amdgpu_top uses "Edge Temperature", "Junction Temperature"
                 sensors = dev.get("Sensors", dev.get("sensors", {}))
                 if isinstance(sensors, dict):
-                    gpu.temp_c = sensors.get("edge", sensors.get("junction", sensors.get("Temperature", 0)))
-                    if isinstance(gpu.temp_c, dict):
-                        gpu.temp_c = gpu.temp_c.get("value", 0)
-                # Power
-                gpu.power_w = sensors.get("power", sensors.get("Power", 0))
-                if isinstance(gpu.power_w, dict):
-                    gpu.power_w = gpu.power_w.get("value", 0)
-                # Utilization via GRBM
-                grbm = dev.get("GRBM", dev.get("grbm", {}))
-                if isinstance(grbm, dict):
-                    gpu.util_pct = grbm.get("Graphics Pipe", grbm.get("gui", 0))
+                    for tkey in ("Edge Temperature", "edge", "Junction Temperature", "junction", "Temperature"):
+                        val = sensors.get(tkey)
+                        if val is not None:
+                            gpu.temp_c = val.get("value", val) if isinstance(val, dict) else val
+                            if gpu.temp_c:
+                                break
+                    # Power — "Average Power", "Input Power", "GFX Power"
+                    for pkey in ("Average Power", "Input Power", "GFX Power", "power", "Power"):
+                        val = sensors.get(pkey)
+                        if val is not None:
+                            gpu.power_w = val.get("value", val) if isinstance(val, dict) else val
+                            if gpu.power_w:
+                                break
+                    # GFX clock
+                    sclk = sensors.get("GFX_SCLK")
+                    if isinstance(sclk, dict):
+                        gpu.clock_mhz = int(sclk.get("value", 0))
+                    elif isinstance(sclk, (int, float)):
+                        gpu.clock_mhz = int(sclk)
+                # Utilization — try gpu_activity first, then GRBM
+                gpu_act = dev.get("gpu_activity", {})
+                if isinstance(gpu_act, dict):
+                    gfx = gpu_act.get("GFX", {})
+                    if isinstance(gfx, dict) and gfx.get("value") is not None:
+                        gpu.util_pct = gfx["value"]
+                if not gpu.util_pct:
+                    grbm = dev.get("GRBM", dev.get("grbm"))
+                    if isinstance(grbm, dict):
+                        gpu.util_pct = grbm.get("Graphics Pipe", grbm.get("gui", 0)) or 0
                 # VRAM
                 vram = dev.get("VRAM", dev.get("vram", {}))
                 if isinstance(vram, dict):
