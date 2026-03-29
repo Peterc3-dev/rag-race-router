@@ -1,0 +1,51 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer BufA { float a[]; };
+layout(set = 0, binding = 1) buffer BufB { float b[]; };
+layout(set = 0, binding = 2) buffer BufC { float c[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+} params;
+
+shared float tileA[16][16];
+shared float tileB[16][16];
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint col = gl_GlobalInvocationID.x;
+    uint localRow = gl_LocalInvocationID.y;
+    uint localCol = gl_LocalInvocationID.x;
+    uint N = params.N;
+
+    float sum = 0.0;
+    uint numTiles = (N + 15) / 16;
+
+    for (uint t = 0; t < numTiles; t++) {
+        uint tiledCol = t * 16 + localCol;
+        uint tiledRow = t * 16 + localRow;
+
+        if (row < N && tiledCol < N)
+            tileA[localRow][localCol] = a[row * N + tiledCol];
+        else
+            tileA[localRow][localCol] = 0.0;
+
+        if (tiledRow < N && col < N)
+            tileB[localRow][localCol] = b[tiledRow * N + col];
+        else
+            tileB[localRow][localCol] = 0.0;
+
+        barrier();
+
+        for (uint k = 0; k < 16; k++) {
+            sum += tileA[localRow][k] * tileB[k][localCol];
+        }
+        barrier();
+    }
+
+    if (row < N && col < N) {
+        c[row * N + col] = sum;
+    }
+}
