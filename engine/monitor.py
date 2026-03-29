@@ -37,7 +37,12 @@ class NpuMetrics:
     present: bool = False
     device_path: str = ""
     driver: str = ""
-    status: str = "unknown"
+    status: str = "unknown"  # unknown, available, smu_error, no_driver, no_device
+    firmware_version: str = ""
+    driver_bound: bool = False
+    pci_power_state: str = ""
+    xrt_version: str = ""
+    flm_version: str = ""
 
 
 @dataclass
@@ -72,6 +77,11 @@ class SystemSnapshot:
                 "device_path": self.npu.device_path,
                 "driver": self.npu.driver,
                 "status": self.npu.status,
+                "firmware_version": self.npu.firmware_version,
+                "driver_bound": self.npu.driver_bound,
+                "pci_power_state": self.npu.pci_power_state,
+                "xrt_version": self.npu.xrt_version,
+                "flm_version": self.npu.flm_version,
             },
             "mem_used_mb": self.mem_used_mb,
             "mem_total_mb": self.mem_total_mb,
@@ -239,20 +249,95 @@ class HardwareMonitor:
                 continue
 
     def _read_npu(self, npu: NpuMetrics):
-        accel = Path("/dev/accel/accel0")
-        npu.present = accel.exists()
-        if npu.present:
-            npu.device_path = str(accel)
-            # Check driver
-            uevent = Path("/sys/class/accel/accel0/device/uevent")
-            if uevent.exists():
+        # Check PCI device exists (Strix Halo NPU: 1022:17F0)
+        npu_pci = Path("/sys/bus/pci/devices/0000:c6:00.1")
+        if not npu_pci.exists():
+            # Scan for any amdxdna-compatible device
+            for dev_path in Path("/sys/bus/pci/devices").iterdir():
+                vendor_path = dev_path / "vendor"
+                device_path = dev_path / "device"
                 try:
-                    for line in uevent.read_text().splitlines():
-                        if line.startswith("DRIVER="):
-                            npu.driver = line.split("=", 1)[1]
+                    if (vendor_path.read_text().strip() == "0x1022" and
+                            device_path.read_text().strip() == "0x17f0"):
+                        npu_pci = dev_path
+                        break
                 except (FileNotFoundError, PermissionError):
-                    pass
-            npu.status = "available" if npu.driver else "no_driver"
+                    continue
+
+        if not npu_pci.exists():
+            npu.status = "no_device"
+            return
+
+        npu.present = True
+
+        # Check if driver is bound
+        driver_link = npu_pci / "driver"
+        npu.driver_bound = driver_link.exists()
+        if npu.driver_bound:
+            npu.driver = Path(os.readlink(str(driver_link))).name
+
+        # PCI power state
+        try:
+            npu.pci_power_state = (npu_pci / "power_state").read_text().strip()
+        except (FileNotFoundError, PermissionError):
+            pass
+
+        # Check accel device node
+        accel = Path("/dev/accel/accel0")
+        if accel.exists():
+            npu.device_path = str(accel)
+
+        # Determine status based on driver binding and accel device
+        if npu.driver_bound and npu.device_path:
+            npu.status = "available"
+        elif npu.driver_bound:
+            npu.status = "driver_loaded"
+        else:
+            # Driver not bound — check kernel log for SMU error (cached, one-time)
+            npu.status = "smu_error" if self._check_npu_smu_error() else "no_driver"
+
+        # Detect XRT version
+        try:
+            xrt_ver = (Path("/opt/xilinx/xrt/version.json")).read_text()
+            import json as _json
+            npu.xrt_version = _json.loads(xrt_ver).get("version", "")
+        except (FileNotFoundError, PermissionError, ValueError):
+            # Fallback: check pacman
+            try:
+                r = subprocess.run(
+                    ["pacman", "-Q", "xrt"],
+                    capture_output=True, text=True, timeout=2.0,
+                )
+                if r.returncode == 0:
+                    npu.xrt_version = r.stdout.strip().split()[-1]
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        # Detect FLM version
+        try:
+            r = subprocess.run(
+                ["flm", "--version"],
+                capture_output=True, text=True, timeout=2.0,
+            )
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    if "FLM" in line:
+                        npu.flm_version = line.strip()
+                        break
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    @staticmethod
+    def _check_npu_smu_error() -> bool:
+        """Check if kernel log contains amdxdna SMU errors (one-time check)."""
+        try:
+            r = subprocess.run(
+                ["journalctl", "-k", "--no-pager", "-g", "aie2_smu.*failed"],
+                capture_output=True, text=True, timeout=3.0,
+            )
+            return r.returncode == 0 and "smu" in r.stdout.lower()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
 
     def _read_memory(self, snap: SystemSnapshot):
         try:

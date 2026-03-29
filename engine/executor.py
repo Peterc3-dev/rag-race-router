@@ -169,6 +169,79 @@ class GpuBelt:
             pass  # Kompute not available — GPU belt will run CPU fallbacks
 
 
+class NpuBelt:
+    """NPU execution belt — runs inference via FastFlowLM (FLM) server.
+
+    FLM exposes an OpenAI-compatible API on localhost. Work items are
+    HTTP requests to the FLM server. Falls back to CPU if NPU is unavailable.
+    """
+
+    def __init__(self, monitor: HardwareMonitor, flm_port: int = 8899):
+        self._monitor = monitor
+        self._port = flm_port
+        self._queue: queue.Queue[tuple[WorkItem, Future]] = queue.Queue()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._running = False
+        self._flm_available = False
+
+    def start(self):
+        self._running = True
+        self._flm_available = self._check_flm()
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        self._queue.put(None)
+
+    @property
+    def available(self) -> bool:
+        return self._flm_available
+
+    def submit(self, work: WorkItem) -> Future:
+        future: Future = Future()
+        self._queue.put((work, future))
+        return future
+
+    def _run_loop(self):
+        while self._running:
+            item = self._queue.get()
+            if item is None:
+                break
+
+            work, future = item
+            start = time.perf_counter()
+            try:
+                result = work.fn(*work.args, **work.kwargs)
+                elapsed = (time.perf_counter() - start) * 1000
+                fragment = Fragment(
+                    device=Device.NPU,
+                    operation=work.operation,
+                    result=result,
+                    duration_ms=elapsed,
+                    timestamp=time.time(),
+                )
+                future.set_result(fragment)
+            except Exception as e:
+                elapsed = (time.perf_counter() - start) * 1000
+                fragment = Fragment(
+                    device=Device.NPU,
+                    operation=work.operation,
+                    error=str(e),
+                    duration_ms=elapsed,
+                    timestamp=time.time(),
+                )
+                future.set_result(fragment)
+
+    def _check_flm(self) -> bool:
+        """Check if FLM server or binary is available."""
+        npu = self._monitor.snapshot.npu
+        if not npu.present or npu.status not in ("available", "driver_loaded"):
+            return False
+        # Check if flm binary exists
+        import shutil
+        return shutil.which("flm") is not None
+
+
 class AssemblyStation:
     """Collects fragments from CPU and GPU belts, combines into output."""
 
@@ -202,7 +275,7 @@ class AssemblyStation:
 
 
 class Executor:
-    """Main executor — dispatches work to CPU/GPU belts, assembles results."""
+    """Main executor — dispatches work to CPU/GPU/NPU belts, assembles results."""
 
     def __init__(
         self,
@@ -214,21 +287,28 @@ class Executor:
         self.dispatcher = dispatcher
         self.cpu_belt = CpuBelt(max_workers=cpu_workers)
         self.gpu_belt = GpuBelt(pulse=pulse, monitor=monitor)
+        self.npu_belt = NpuBelt(monitor=monitor)
         self.assembly = AssemblyStation()
         self._monitor = monitor
 
     def start(self):
         self.gpu_belt.start()
+        self.npu_belt.start()
+        # Update dispatcher with NPU availability
+        self.dispatcher.npu_available = self.npu_belt.available
 
     def stop(self):
         self.gpu_belt.stop()
+        self.npu_belt.stop()
         self.cpu_belt.shutdown()
 
     def execute(self, work: WorkItem) -> Fragment:
         """Execute a single work item on the best available device."""
         decision = self.dispatcher.dispatch(work.operation, work.input_size)
 
-        if decision.device == Device.GPU:
+        if decision.device == Device.NPU and self.npu_belt.available:
+            future = self.npu_belt.submit(work)
+        elif decision.device == Device.GPU:
             future = self.gpu_belt.submit(work)
         else:
             future = self.cpu_belt.submit(work)
@@ -251,7 +331,9 @@ class Executor:
         futures = []
         for work in works:
             decision = self.dispatcher.dispatch(work.operation, work.input_size)
-            if decision.device == Device.GPU:
+            if decision.device == Device.NPU and self.npu_belt.available:
+                futures.append((work, self.npu_belt.submit(work)))
+            elif decision.device == Device.GPU:
                 futures.append((work, self.gpu_belt.submit(work)))
             else:
                 futures.append((work, self.cpu_belt.submit(work)))

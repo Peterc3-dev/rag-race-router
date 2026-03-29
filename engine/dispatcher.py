@@ -127,12 +127,15 @@ class Dispatcher:
                 confidence=0.6,
             )
 
-        # NPU for quantized inference if available
-        if operation in ("quantized_matmul", "int8_gemm") and self.npu_available:
+        # NPU for quantized inference and LLM token generation if available
+        if self.npu_available and operation in (
+            "quantized_matmul", "int8_gemm", "llm_generate",
+            "npu_inference", "token_generation", "embedding",
+        ):
             return DispatchDecision(
                 device=Device.NPU,
-                reason=f"heuristic: {operation} is quantized → npu",
-                confidence=0.5,
+                reason=f"heuristic: {operation} is NPU-optimized → npu",
+                confidence=0.6,
                 fallback=Device.CPU,
             )
 
