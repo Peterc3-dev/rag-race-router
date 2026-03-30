@@ -150,7 +150,11 @@ The core runtime architecture treats the three processors as an assembly line wi
 | Fails if scheduler is wrong | Degrades gracefully (fewer fragments, slower, never crashes) |
 | No learning | Learns → encodes rules → goes idle → intervenes on exception |
 
-### The three-phase build plan
+### Build plan
+
+See [ROADMAP.md](ROADMAP.md) for the full four-phase roadmap including the Hyperdimensional Computing research direction.
+
+### The three-phase build plan (Phase 1 detail)
 
 **Phase 1 (weeks): Prove three-processor inference**
 - Get XDNA NPU running on Arch/CachyOS via xdna-driver + FastFlowLM
@@ -174,7 +178,7 @@ The core runtime architecture treats the three processors as an assembly line wi
 
 ## Novel contributions
 
-Based on a full literature review, six aspects of this project have no prior art:
+Based on a full literature review, seven aspects of this project have no prior art:
 
 1. **NPU-as-scheduling-agent** — Running a placement policy neural network on dedicated NPU columns to orchestrate CPU+GPU workloads. The SmartNIC-as-orchestrator pattern (Wave, Conspirator, RingLeader) validates the concept; no one has applied it to NPUs.
 
@@ -187,6 +191,8 @@ Based on a full literature review, six aspects of this project have no prior art
 5. **Vulkan+XRT memory bridge** — Exploiting Vulkan's superior unified memory access on gfx1150 as the GPU-side API with CPU-mediated sharing to XRT for NPU access. No existing project combines these two stacks.
 
 6. **NPU-bookended assembly line** — The NPU dispatches work at the pipeline start AND assembles output at the end, with CPU and GPU as asynchronous decoupled producers. The 1000:1 speed ratio (NPU microseconds vs CPU/GPU milliseconds) makes the NPU appear to occupy both positions simultaneously. After initial learning, dispatch rules are encoded as lightweight interrupt-driven policies with near-zero steady-state overhead. No existing runtime uses a single processor for both dispatch and assembly in a closed feedback loop.
+
+7. **Hyperdimensional Computing on XDNA 2 systolic array** — Using HDC/VSA (10,000-dimensional vectors, XOR binding, cosine similarity) for routing decisions and potentially inference itself on the NPU's systolic array. The XDNA 2's grid topology maps naturally to HDC's parallel similarity search. No existing project combines HDC with NPU systolic arrays for ML dispatch or inference.
 
 ---
 
