@@ -34,7 +34,7 @@ Runtime telemetry drives routing decisions. The "RAG" in the name — retrieval-
 
 ## Phase 3: Hyperdimensional Computing (HDC) Routing Layer
 
-*Status: Research spike*
+*Status: Phase 1 proof implemented*
 
 Encode processor states, model characteristics, and workload signatures as hypervectors. The NPU performs similarity search to snap to the optimal routing configuration via field resolution instead of if/else logic.
 
@@ -130,7 +130,7 @@ The question isn't whether the hardware CAN do it — it already does matrix mul
 |---|---|---|
 | Phase 1 | Implementation started | Current |
 | Phase 2 | Research | Weeks |
-| Phase 3 | Research spike | Months |
+| Phase 3 | Phase 1 proof implemented | Months |
 | Phase 4 | Speculative | Unknown |
 
 Phases 1-2 are engineering. Phases 3-4 are research. The repo ships whatever works; roadmap items are signals of direction, not commitments.

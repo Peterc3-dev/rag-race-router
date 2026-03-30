@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -71,6 +72,10 @@ def main():
         "--musicgen", action="store_true",
         help="Generate music through the engine (compare vs standalone)",
     )
+    parser.add_argument(
+        "--musicgen-tri", action="store_true",
+        help="Run MusicGen through tri-processor analysis pipeline",
+    )
     parser.add_argument("-p", "--prompt", type=str, default="deep bass dark atmospheric",
                         help="MusicGen prompt")
     parser.add_argument("--preset", type=str, help="MusicGen preset (electronic, ambient, etc.)")
@@ -85,8 +90,12 @@ def main():
         help="Train the neural dispatch scheduler via simulated workloads",
     )
     parser.add_argument(
-        "--scheduler", choices=["show", "benchmark"],
+        "--scheduler", choices=["show", "benchmark", "hdc"],
         help="Show scheduler policy or benchmark latency",
+    )
+    parser.add_argument(
+        "--hdc-benchmark", action="store_true",
+        help="Run Neural vs HDC scheduler A/B benchmark",
     )
     parser.add_argument("--config-file", type=str, help="Path to JSON config file")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
@@ -204,6 +213,25 @@ def main():
 
     if args.scheduler:
         _run_scheduler_cmd(args.scheduler, args.json)
+        return
+
+    if getattr(args, 'musicgen_tri', False):
+        from .musicgen_tri import run_tri_processor
+        results = run_tri_processor(
+            prompt=args.prompt,
+            duration=args.d,
+            preset=args.preset,
+            output_dir=os.path.dirname(args.output) if args.output else "/tmp",
+        )
+        if args.json:
+            _output(results, True)
+        return
+
+    if args.hdc_benchmark:
+        from .hdc_benchmark import benchmark as hdc_bench
+        results = hdc_bench()
+        if args.json:
+            _output(results, True)
         return
 
     if args.musicgen:
@@ -713,6 +741,13 @@ def _run_scheduler_cmd(cmd: str, as_json: bool):
                 "param_count": scheduler.param_count,
                 "npu_status": npu_status,
             }, True)
+
+    elif cmd == "hdc":
+        from .hdc_scheduler import HdcScheduler
+        hdc = HdcScheduler()
+        print()
+        print(hdc.show())
+        return
 
     elif cmd == "benchmark":
         results = scheduler.benchmark_latency()
