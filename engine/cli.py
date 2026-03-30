@@ -76,6 +76,18 @@ def main():
     parser.add_argument("--preset", type=str, help="MusicGen preset (electronic, ambient, etc.)")
     parser.add_argument("-d", type=float, default=10.0, help="MusicGen duration in seconds")
     parser.add_argument("-o", "--output", type=str, help="Output file path")
+    parser.add_argument(
+        "--analyze", type=str, metavar="MODEL.onnx",
+        help="Analyze an ONNX model and show per-operator device routing",
+    )
+    parser.add_argument(
+        "--train-scheduler", action="store_true",
+        help="Train the neural dispatch scheduler via simulated workloads",
+    )
+    parser.add_argument(
+        "--scheduler", choices=["show", "benchmark"],
+        help="Show scheduler policy or benchmark latency",
+    )
     parser.add_argument("--config-file", type=str, help="Path to JSON config file")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--temp-ceiling", type=float, help="GPU temperature ceiling")
@@ -180,6 +192,18 @@ def main():
             print(f"  1% low:    {e['p1_low_ms']:.1f}ms ({e['p1_low_fps']:.0f} FPS)")
             print(f"  Peak GPU:  {results['peak_gpu_temp']:.0f}C")
             print(f"  Device map: {results['device_map']}")
+        return
+
+    if args.analyze:
+        _run_analyze(args.analyze, args.json)
+        return
+
+    if args.train_scheduler:
+        _run_train_scheduler(engine, args.runs or 50, args.verbose, args.json)
+        return
+
+    if args.scheduler:
+        _run_scheduler_cmd(args.scheduler, args.json)
         return
 
     if args.musicgen:
@@ -510,6 +534,197 @@ def _pretty_print(data: dict, indent: int = 0):
                     print(f"{prefix}  - {item}")
         else:
             print(f"{prefix}{key}: {value}")
+
+
+def _run_analyze(model_path: str, as_json: bool):
+    """Analyze an ONNX model and display per-operator routing."""
+    import os
+    from .onnx_dispatcher import OnnxDispatcher
+
+    if not os.path.exists(model_path):
+        print(f"Error: {model_path} not found")
+        sys.exit(1)
+
+    d = OnnxDispatcher(model_path)
+
+    if as_json:
+        _output({
+            "model": os.path.basename(model_path),
+            "routing": d.get_routing(),
+            "rules": d.export_rules(),
+            "op_summary": d.op_type_summary(),
+            "summary": d.summary(),
+        }, True)
+    else:
+        print(f"ONNX Model Analysis: {os.path.basename(model_path)}")
+        print("=" * 55)
+        print(d.summary())
+        print()
+
+        # Show per-op-type breakdown
+        ops = d.op_type_summary()
+        print(f"{'Op Type':<25} {'Device':<8} {'Count':<8} {'Avg Size':<12}")
+        print("-" * 55)
+        for op, info in sorted(ops.items(), key=lambda x: -x[1]["count"]):
+            avg_size = int(sum(info["sizes"]) / len(info["sizes"])) if info["sizes"] else 0
+            size_str = f"{avg_size:,}" if avg_size else "-"
+            print(f"{op:<25} {info['device']:<8} {info['count']:<8} {size_str:<12}")
+        print()
+
+        rules = d.export_rules()
+        print(f"Routing rules: {len(rules)} op types mapped")
+        print(f"  GPU ops: {sum(1 for v in rules.values() if v == 'gpu')}")
+        print(f"  NPU ops: {sum(1 for v in rules.values() if v == 'npu')}")
+        print(f"  CPU ops: {sum(1 for v in rules.values() if v == 'cpu')}")
+
+
+def _run_train_scheduler(engine: RagRaceRouter, runs: int, verbose: bool, as_json: bool):
+    """Train the neural scheduler by running simulated workloads."""
+    from .npu_scheduler import NpuScheduler
+    from .ops import build_demo_workload
+    import os
+    import numpy as np
+
+    scheduler = NpuScheduler()
+    weights_path = os.path.expanduser("~/.rag-race-router/scheduler.npz")
+    scheduler.load(weights_path)
+
+    engine.start()
+    time.sleep(1.0)
+
+    print(f"Training neural scheduler ({runs} runs)...")
+    print(f"  Weights: {weights_path}")
+    print(f"  Params: {scheduler.param_count}")
+    print()
+
+    for run_idx in range(runs):
+        snap = engine.monitor.snapshot
+        workload = build_demo_workload()
+
+        for step in workload:
+            op = step["name"]
+            size = step["input_size"]
+
+            metrics = np.array([
+                min(snap.gpu.temp_c / 100.0, 1.0),
+                min(snap.gpu.util_pct / 100.0, 1.0),
+                min(snap.gpu.vram_used_mb / max(snap.gpu.vram_total_mb, 1), 1.0),
+                min(snap.cpu.load_avg[0] / 100.0, 1.0) if snap.cpu.load_avg else 0.5,
+                1.0 if engine.dispatcher.npu_available else 0.0,
+                min(size / 1e6, 1.0),
+            ], dtype=np.float32)
+
+            device, probs = scheduler.forward(metrics)
+
+            # Simulate latency based on device + op characteristics
+            # Benchmarked: GPU 1084 GFLOPS, CPU 27 GFLOPS, NPU 50 TOPS INT8
+            size_norm = min(size / 1e6, 1.0)
+            is_compute = op in ("matmul", "attention", "project", "conv2d", "gemm")
+            is_small = size < 256 * 256
+            is_activation = op in ("normalize", "softmax", "relu", "embed", "layernorm")
+
+            if device == "gpu":
+                if is_compute:
+                    latency = 0.1 + size_norm * 0.5  # GPU excels at large compute
+                else:
+                    latency = 0.8 + size_norm * 0.3  # GPU overhead for non-compute
+            elif device == "npu":
+                if is_activation or is_small:
+                    latency = 0.05 + size_norm * 0.2  # NPU best for small/activation ops
+                elif is_compute:
+                    latency = 0.3 + size_norm * 2.0  # NPU slower for large compute
+                else:
+                    latency = 0.2 + size_norm * 0.4
+            else:  # cpu
+                if is_compute:
+                    latency = 2.0 + size_norm * 5.0  # CPU very slow for large compute
+                elif is_activation:
+                    latency = 0.5 + size_norm * 0.3  # CPU OK for activations
+                else:
+                    latency = 0.1 + size_norm * 0.1  # CPU fastest for control flow
+
+            # Thermal penalty for GPU
+            temp_norm = snap.gpu.temp_c / 100.0
+            if device == "gpu" and temp_norm > 0.85:
+                latency *= 1.0 + (temp_norm - 0.85) * 10.0
+            # NPU unavailable penalty
+            if device == "npu" and not engine.dispatcher.npu_available:
+                latency *= 20.0
+
+            reward = -latency
+            scheduler.update(metrics, device, reward)
+
+            if verbose:
+                print(f"  [{run_idx+1}/{runs}] {op:<14} -> {device} "
+                      f"(lat={latency:.1f}ms, reward={reward:.3f})")
+
+        if (run_idx + 1) % 10 == 0 or run_idx == 0:
+            print(f"  Run {run_idx+1}/{runs}: avg_reward={scheduler.running_reward:.4f}")
+
+    scheduler.save(weights_path)
+    engine.stop()
+
+    print()
+    print(f"Training complete. {scheduler.total_updates} updates.")
+    print(f"Weights saved to: {weights_path}")
+    print()
+    print(scheduler.show_policy())
+
+    if as_json:
+        _output({
+            "runs": runs,
+            "updates": scheduler.total_updates,
+            "running_reward": scheduler.running_reward,
+            "weights_path": weights_path,
+            "latency": scheduler.benchmark_latency(),
+        }, True)
+
+
+def _run_scheduler_cmd(cmd: str, as_json: bool):
+    """Show scheduler status or run benchmark."""
+    from .npu_scheduler import NpuScheduler
+    import os
+
+    scheduler = NpuScheduler()
+    weights_path = os.path.expanduser("~/.rag-race-router/scheduler.npz")
+
+    if scheduler.load(weights_path):
+        print(f"Loaded scheduler from: {weights_path}")
+    else:
+        print(f"No saved scheduler found at: {weights_path}")
+        print("Run --train-scheduler first.")
+        return
+
+    if cmd == "show":
+        npu_status = scheduler.deploy_to_npu()
+        print()
+        print(f"NPU Scheduler Status:")
+        print(f"  Weights: {weights_path}")
+        print(f"  Training runs: {scheduler.total_updates}")
+        print(f"  Running on: {npu_status}")
+        print()
+        print(scheduler.show_policy())
+
+        if as_json:
+            _output({
+                "weights_path": weights_path,
+                "total_updates": scheduler.total_updates,
+                "running_reward": scheduler.running_reward,
+                "param_count": scheduler.param_count,
+                "npu_status": npu_status,
+            }, True)
+
+    elif cmd == "benchmark":
+        results = scheduler.benchmark_latency()
+        print()
+        print(f"Scheduler Latency Benchmark ({results['n']} iterations):")
+        print(f"  Avg: {results['avg_us']:.2f} us")
+        print(f"  Min: {results['min_us']:.2f} us")
+        print(f"  Max: {results['max_us']:.2f} us")
+        print(f"  P99: {results['p99_us']:.2f} us")
+
+        if as_json:
+            _output(results, True)
 
 
 if __name__ == "__main__":

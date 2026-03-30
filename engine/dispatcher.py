@@ -2,12 +2,22 @@
 
 After N runs, encodes dispatch patterns as lightweight rules. Re-evaluates
 when exceptions occur (thermal spike, device error, shape mismatch).
+
+Supports two dispatch modes:
+  1. Heuristic/personality (original) — rule-based with learned personality
+  2. Neural scheduler — tiny MLP trained via REINFORCE policy gradient
+
+And ONNX model analysis:
+  dispatcher.load_model("model.onnx") → per-operator routing table
 """
 
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
+
+import numpy as np
 
 from .personality import Personality
 from .monitor import HardwareMonitor, SystemSnapshot
@@ -207,9 +217,95 @@ class Dispatcher:
         self.personality.update_rules()
         self._rules_encoded = True
 
+    # ------------------------------------------------------------------
+    # ONNX model analysis
+    # ------------------------------------------------------------------
+
+    def load_model(self, model_path: str) -> str:
+        """Load an ONNX model and build per-operator routing from its graph.
+
+        Returns the routing summary string.
+        """
+        from .onnx_dispatcher import OnnxDispatcher
+
+        self._onnx_dispatcher = OnnxDispatcher(model_path, self.personality)
+        self._onnx_routing = self._onnx_dispatcher.get_routing()
+        self._onnx_rules = self._onnx_dispatcher.export_rules()
+        return self._onnx_dispatcher.summary()
+
+    def get_onnx_routing(self) -> dict:
+        """Return ONNX model routing table (after load_model)."""
+        if hasattr(self, "_onnx_routing"):
+            return self._onnx_routing
+        return {}
+
+    # ------------------------------------------------------------------
+    # Neural scheduler integration
+    # ------------------------------------------------------------------
+
+    def enable_neural_scheduler(self, weights_path: str = None):
+        """Switch to the neural (NpuScheduler) dispatch mode.
+
+        The scheduler is a tiny MLP trained via REINFORCE — it replaces
+        the heuristic dispatch with a learned policy.
+        """
+        from .npu_scheduler import NpuScheduler
+
+        self._neural_scheduler = NpuScheduler()
+        self._scheduler_path = weights_path or os.path.expanduser(
+            "~/.rag-race-router/scheduler.npz"
+        )
+        self._neural_scheduler.load(self._scheduler_path)
+        self._use_neural = True
+
+    def neural_dispatch(self, operation: str, input_size: int = 0) -> DispatchDecision:
+        """Dispatch using the neural scheduler."""
+        if not hasattr(self, "_neural_scheduler") or not self._use_neural:
+            return self.dispatch(operation, input_size)
+
+        snap = self.monitor.snapshot
+
+        metrics = np.array([
+            min(snap.gpu.temp_c / 100.0, 1.0),
+            min(snap.gpu.util_pct / 100.0, 1.0),
+            min(snap.gpu.vram_used_mb / max(snap.gpu.vram_total_mb, 1) , 1.0),
+            min(snap.cpu.load_avg[0] / 100.0, 1.0) if snap.cpu.load_avg else 0.5,
+            1.0 if self.npu_available else 0.0,
+            min(input_size / 1e6, 1.0),
+        ], dtype=np.float32)
+
+        device_name, probs = self._neural_scheduler.forward(metrics)
+        self._last_neural_metrics = metrics
+
+        device = Device(device_name)
+
+        # Validate usability
+        if device == Device.GPU and not self._gpu_usable(snap):
+            device = Device.NPU if self.npu_available else Device.CPU
+        if device == Device.NPU and not self.npu_available:
+            device = Device.CPU
+
+        return DispatchDecision(
+            device=device,
+            reason=f"neural: {operation} -> {device.value} (p={probs[self._neural_scheduler.DEVICES.index(device.value)]:.2f})",
+            confidence=float(probs[self._neural_scheduler.DEVICES.index(device.value)]),
+            fallback=Device.CPU,
+        )
+
+    def record_neural_result(self, device_str: str, latency_ms: float):
+        """Feed result back to neural scheduler for learning."""
+        if hasattr(self, "_neural_scheduler") and hasattr(self, "_last_neural_metrics"):
+            reward = -latency_ms / 100.0  # Lower latency = higher reward
+            self._neural_scheduler.update(self._last_neural_metrics, device_str, reward)
+
+    def save_scheduler(self):
+        """Persist scheduler weights."""
+        if hasattr(self, "_neural_scheduler"):
+            self._neural_scheduler.save(self._scheduler_path)
+
     @property
     def stats(self) -> dict:
-        return {
+        base = {
             "total_dispatches": self._total_dispatches,
             "reroutes": self._reroutes,
             "rules_encoded": self._rules_encoded,
@@ -222,3 +318,12 @@ class Dispatcher:
                 for k, p in self._profiles.items()
             },
         }
+        if hasattr(self, "_neural_scheduler"):
+            base["neural_scheduler"] = {
+                "param_count": self._neural_scheduler.param_count,
+                "training_updates": self._neural_scheduler.total_updates,
+                "running_reward": round(self._neural_scheduler.running_reward, 4),
+            }
+        if hasattr(self, "_onnx_dispatcher"):
+            base["onnx_model"] = self._onnx_dispatcher.summary()
+        return base
