@@ -132,5 +132,53 @@ The question isn't whether the hardware CAN do it — it already does matrix mul
 | Phase 2 | Research | Weeks |
 | Phase 3 | Phase 1 proof implemented | Months |
 | Phase 4 | Speculative | Unknown |
+| Phase 5 | Planned | Future |
 
-Phases 1-2 are engineering. Phases 3-4 are research. The repo ships whatever works; roadmap items are signals of direction, not commitments.
+Phases 1-2 are engineering. Phases 3-4 are research. Phase 5 is the production rewrite. The repo ships whatever works; roadmap items are signals of direction, not commitments.
+
+## Phase 5: Rust Rewrite — Native Tri-Processor Runtime
+
+*Status: Planned*
+
+Rewrite the hot paths in Rust to eliminate Pythons GIL bottleneck and MIOpens gfx1150 bugs. Build a native tri-processor runtime with direct hardware access.
+
+### Why Rust
+
+- **Pythons GIL** limits parallelism — only one thread of Python executes at a time. The executor belts cant truly run in parallel.
+- **MIOpen backward pass is broken** on gfx1150 — workspace allocation bug makes training slow/broken through ROCm. Rust + custom Vulkan backward kernels bypass MIOpen entirely.
+- **HDC codebook lookup** takes 5,221μs in Python but should be <1μs in Rust on the XDNA systolic array. Thats 5,000μs of Python overhead.
+- **Rusts ownership model** = zero-cost memory safety for unified memory coordination across three processors. No garbage collector pauses during real-time dispatch.
+
+### What to rewrite
+
+1. **HDC codebook** — similarity search, encoding, codebook management (10,000-dim cosine in Rust = sub-microsecond)
+2. **Dispatcher + pulse controller** — routing table, thermal monitoring, burst/cooldown
+3. **Executor belts** — CPU (`rayon` parallel iterators), GPU (`ash` Vulkan bindings), NPU (XRT FFI)
+4. **Monitor** — direct sysfs/amdgpu reads, no Python psutil overhead
+5. **Training backward pass** — custom Vulkan compute shaders for conv/linear gradients, bypassing MIOpen entirely. This unblocks codec training on gfx1150.
+
+### Rust stack
+
+- `ash` — Vulkan bindings (GPU compute + custom backward kernels)
+- `rayon` — parallel CPU work-stealing (CPU belt)
+- XRT FFI — XDNA NPU bindings
+- `pyo3` — Python bindings so existing CLI/API layer still works
+- `serde` — codebook serialization
+- `ndarray` or `nalgebra` — tensor operations
+
+### Path
+
+1. Keep Python prototype as reference implementation
+2. Rewrite hot paths with `pyo3` bindings — drop-in replacement, Python CLI unchanged
+3. Benchmark: Python vs Rust on same hardware, same workloads
+4. Custom Vulkan backward kernels for Conv1d, Linear, LayerNorm — unblocks training
+5. Full native Rust binary, Python layer optional
+6. Package as a single binary: `rag-race-router --train model.onnx --data ./audio/`
+
+### What this unlocks
+
+- **Training on Vulkan** — bypass MIOpen entirely, custom backward kernels for gfx1150
+- **True parallel execution** — all three belts running simultaneously, no GIL
+- **Sub-microsecond HDC dispatch** — Rust + NPU systolic array
+- **Single binary distribution** — no Python, no pip, no venv. Download and run.
+- **The Trigonometric Assembly Processing Engine in its final form**
