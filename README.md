@@ -1,4 +1,4 @@
-# R.A.G-Race-Router [Adaptive Tri-Processor Inference Runtime]
+# R.A.G-Race-Router [Trigonometric Route Processing Engine]
 
 **A self-optimizing inference runtime that coordinates CPU, iGPU, and NPU on AMD Ryzen AI 300 series APUs.**
 
