@@ -299,20 +299,23 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the detailed memory bridge design.
 
 ## Status
 
-🟢 **Phase 1: Implementation started** — Engine built and benchmarked.
+🟢 **Pre-alpha — Three-processor dispatch working**
 
 ### What's running now
 
-| Component | Status | Benchmark |
-|-----------|--------|-----------|
+| Component | Status | Result |
+|-----------|--------|--------|
 | Pulsed inference engine | ✅ Working | 7 modules, CLI interface |
 | Vulkan GPU compute (Kompute) | ✅ Working | 512x512 matmul: 0.82ms (14.6x vs CPU) |
 | CPU belt (ThreadPoolExecutor) | ✅ Working | 512x512 matmul: 12.02ms |
 | Hardware monitor | ✅ Working | GPU/CPU/NPU metrics via amdgpu_top + sysfs |
 | Personality (SQLite learning) | ✅ Working | Records per-run metrics, builds routing rules |
 | Thermal pulse controller | ✅ Working | Adaptive burst/cooldown based on GPU temp |
-| NPU detection | ✅ Detected | amdxdna driver loaded, /dev/accel/accel0 |
-| NPU execution belt | 🔜 Next | IREE runtime installed, integration pending |
+| ONNX dispatcher | ✅ Done | Tested on 2,755 ops from Piper TTS model |
+| NPU scheduler | ✅ Done | 163-param MLP, 12μs decisions, learned hot GPU→NPU routing |
+| Thermal stress test | ✅ Done | 438 ops, 54 adaptive reroutes, GPU peaked 50°C |
+| Gaming PoC | ✅ Done | 5-stage frame pipeline across CPU/GPU/NPU |
+| NPU execution belt | ✅ Working | Patched amdxdna driver, Llama 3.2 1B at 40-46 tok/s |
 
 ```
 python -m engine --benchmark     # Run diagnostic benchmark
@@ -321,6 +324,28 @@ python -m engine --personality show  # View learned routing rules
 ```
 
 Contributions, discussion, and collaboration welcome — especially from anyone running Ryzen AI 300 on Linux.
+
+---
+
+## What's in the repo
+
+```
+rag-race-router/
+├── README.md             ← This file
+├── ROADMAP.md            ← Four-phase roadmap (HDC research direction)
+├── engine/               ← Inference engine (dispatcher, belts, scheduler, monitor)
+├── blog-post.md          ← dev.to article
+├── LICENSE               ← MIT
+```
+
+---
+
+## Related projects
+
+- [amdxdna-strix-fix](https://github.com/Peterc3-dev/amdxdna-strix-fix) — Patch for AMD XDNA NPU driver on Strix Point/Halo (required for NPU belt)
+- [APU-Codec](https://github.com/Peterc3-dev/apu-codec) — Neural audio codec designed for tri-processor inference (NPU encoder, GPU decoder)
+- [unified-ml](https://github.com/Peterc3-dev/unified-ml) — Custom HIP + Vulkan kernels for AMD APU unified memory
+- [pytorch-gfx1150](https://github.com/Peterc3-dev/pytorch-gfx1150) — PyTorch built from source for Radeon 890M (RDNA 3.5)
 
 ---
 
