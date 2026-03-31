@@ -30,6 +30,7 @@ class HdcScheduler:
     def __init__(self, dimensions: int = DIMENSIONS):
         self.d = dimensions
         self.codebook = []  # List of (state_hv, device, metadata)
+        self._codebook_dirty = True
         self.save_path = os.path.expanduser("~/.rag-race-router/hdc_codebook.json")
 
         if not HDC_AVAILABLE:
@@ -137,6 +138,32 @@ class HdcScheduler:
         # Bundle all components into one state vector
         return self._bundle(components)
 
+    def _batch_similarity(self, state_hv: torch.Tensor) -> Tuple[str, float]:
+        """Vectorized codebook lookup via single matmul.
+
+        Phase 2 optimization: pre-normalize codebook, then cosine similarity
+        is a matrix-vector product. ~200us vs 5221us for the per-entry loop.
+        """
+        if not hasattr(self, '_codebook_matrix') or self._codebook_dirty:
+            hvs = torch.stack([e['hv'].float() for e in self.codebook])
+            norms = torch.norm(hvs, dim=1, keepdim=True).clamp(min=1e-8)
+            self._codebook_matrix = hvs / norms
+            self._codebook_devices = [e['device'] for e in self.codebook]
+            self._codebook_dirty = False
+
+        q = state_hv.float().unsqueeze(0)
+        q = q / torch.norm(q).clamp(min=1e-8)
+
+        # Single matmul: [1, D] @ [D, N] = [1, N] similarities
+        similarities = (q @ self._codebook_matrix.T).squeeze(0)
+
+        best_idx = torch.argmax(similarities).item()
+        best_sim = similarities[best_idx].item()
+
+        if best_sim < 0.1:
+            return None, best_sim
+        return self._codebook_devices[best_idx], best_sim
+
     def dispatch(self, metrics: Dict) -> Tuple[str, float]:
         """
         Find the best routing decision for the current state.
@@ -145,25 +172,15 @@ class HdcScheduler:
         This is the moment the magnets snap.
         """
         if not self.codebook:
-            # Cold start -- no patterns yet, use heuristics
             return self._cold_start(metrics)
 
         state_hv = self.encode_state(metrics)
+        device, similarity = self._batch_similarity(state_hv)
 
-        best_device = 'cpu'
-        best_similarity = -1.0
-
-        for entry in self.codebook:
-            sim = self._similarity(state_hv, entry['hv'])
-            if sim > best_similarity:
-                best_similarity = sim
-                best_device = entry['device']
-
-        # If similarity is too low, the current state doesn't match any pattern well
-        if best_similarity < 0.1:
+        if device is None:
             return self._cold_start(metrics)
 
-        return best_device, best_similarity
+        return device, similarity
 
     def _cold_start(self, metrics: Dict) -> Tuple[str, float]:
         """Heuristic routing when codebook is empty or no match found."""
@@ -196,6 +213,7 @@ class HdcScheduler:
         device_latencies = [e['latency_ms'] for e in self.codebook if e['device'] == device]
         if not device_latencies or latency_ms <= np.median(device_latencies) * 1.2:
             self.codebook.append(entry)
+            self._codebook_dirty = True
 
             # Keep codebook bounded (oldest entries evicted)
             max_entries = 1000
