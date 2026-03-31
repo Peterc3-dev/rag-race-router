@@ -90,3 +90,58 @@ AIR_TRANSFORM_TILING_SCRIPT=transform_aie2p.mlir python vec-add.py
 - Test larger matrix sizes to confirm crossover point
 - Integrate triton-xdna matmul into inference pipeline alongside FastFlowLM
 - Consider Rust FFI for XRT to bypass Python dispatch overhead entirely
+
+## Persistent Runtime Experiment (v2)
+
+Tested bypassing Triton-XDNA entirely via direct pyxrt API to isolate overhead source.
+
+### Setup
+- Pre-allocated all buffer objects at init (one-time: 141ms)
+- Pre-loaded xclbin, hardware context, kernel handle
+- Measured dispatch with and without data copy
+
+### Results
+
+| Method | Avg Latency | Notes |
+|--------|------------|-------|
+| Triton-XDNA dispatch | 62,000 us | Per-call xclbin load + BO alloc |
+| Persistent full dispatch | 113,438 us | Pre-alloc BOs, still copy data |
+| Persistent kernel only | 111,953 us | No data copy, just run+wait |
+| Data copy overhead | 1,485 us | Negligible |
+| CPU numpy matmul | 5,310 us | Winner at 256x256 |
+
+### Key finding
+
+The ~112ms overhead is **in the XRT kernel driver**, not in Python, not in data copy, not in buffer allocation. The XDNA driver has high per-dispatch overhead by design.
+
+This is because the NPU is a **pipeline processor, not a function-call processor**:
+- Each dispatch programs DMA controllers, configures the AIE array, and synchronizes
+- FastFlowLM achieves 60 tok/s by compiling the **entire model** as one NPU program and streaming tokens through a single persistent dispatch
+- Individual kernel calls (matmul, vec-add) pay the full setup cost every time
+
+### Architectural conclusion
+
+The NPU dispatch model is fundamentally different from CPU/GPU:
+
+| Processor | Dispatch Model | Optimal Use |
+|-----------|---------------|-------------|
+| CPU | Instant (ns) | Small ops, routing, pre/post processing |
+| GPU | Fast (us) | Medium ops, training, attention |
+| NPU | Slow setup, fast sustained (ms init, ns/op) | Whole-model inference, streaming workloads |
+
+**The tri-processor router doesn't fight the dispatch model — it respects it:**
+- CPU handles HDC routing at 200us (25x faster than Phase 1)
+- NPU runs sustained inference via FastFlowLM (60 tok/s, <2W)
+- GPU fills the middle for operations too large for CPU cache but not worth NPU setup cost
+
+### NPU vs CPU crossover point (measured)
+
+| Matrix Size | NPU (ms) | CPU (ms) | Winner |
+|------------|----------|----------|--------|
+| 256x256 | 62.5 | 0.4 | CPU |
+| 512x512 | 60.3 | 1.0 | CPU |
+| 1024x1024 | 65.7 | 8.0 | CPU |
+| 2048x2048 | 75.5 | 33.8 | CPU |
+| 4096x4096 | 127.0 | 235.1 | **NPU** |
+
+Crossover: between 2048 and 4096. NPU wins at 4096+ where compute exceeds dispatch overhead.
