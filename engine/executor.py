@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 from .dispatcher import Device, Dispatcher, DispatchDecision
 from .pulse import PulseController
 from .monitor import HardwareMonitor
+from .npu_belt import NpuExecutionBelt
 
 
 @dataclass
@@ -176,13 +177,15 @@ class NpuBelt:
     HTTP requests to the FLM server. Falls back to CPU if NPU is unavailable.
     """
 
-    def __init__(self, monitor: HardwareMonitor, flm_port: int = 8899):
+    def __init__(self, monitor: HardwareMonitor, flm_port: int = 8899,
+                 execution_belt: NpuExecutionBelt = None):
         self._monitor = monitor
         self._port = flm_port
         self._queue: queue.Queue[tuple[WorkItem, Future]] = queue.Queue()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._running = False
         self._flm_available = False
+        self.execution_belt = execution_belt or NpuExecutionBelt()
 
     def start(self):
         self._running = True
@@ -195,7 +198,12 @@ class NpuBelt:
 
     @property
     def available(self) -> bool:
-        return self._flm_available
+        return self._flm_available or self.execution_belt.npu_available
+
+    @property
+    def belt_status(self) -> dict:
+        """Status of the NPU execution belt backends."""
+        return self.execution_belt.status()
 
     def submit(self, work: WorkItem) -> Future:
         future: Future = Future()
@@ -287,7 +295,8 @@ class Executor:
         self.dispatcher = dispatcher
         self.cpu_belt = CpuBelt(max_workers=cpu_workers)
         self.gpu_belt = GpuBelt(pulse=pulse, monitor=monitor)
-        self.npu_belt = NpuBelt(monitor=monitor)
+        self._npu_execution_belt = NpuExecutionBelt(personality=None)
+        self.npu_belt = NpuBelt(monitor=monitor, execution_belt=self._npu_execution_belt)
         self.assembly = AssemblyStation()
         self._monitor = monitor
 
